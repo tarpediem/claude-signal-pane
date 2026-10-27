@@ -116,12 +116,17 @@ test('the pane opens a conversation, sends a reply and a reaction', async ($, on
     },
   }))
   on('clock.every', () => ({ value: undefined }))
+  on('ui.panes', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /Moi : yo/ }))?.text).toBe('Moi : yo')
+
+  await ui.input({ key: 'search', text: 'SALU', kind: 'change' })
+  expect((await ui.find({ type: 'Text', text: /: salut/ }))?.text).toBe('Alice B. : salut')
+  await ui.press({ key: 'clear-search' })
 
   await ui.press({ key: 'u:aaa' })
   expect((await ui.find({ type: 'Text', text: /✓✓/ }))?.text).toContain('✓✓ lu')

@@ -44,6 +44,8 @@ declare module 'claude-code' {
       sentCount: number
       reactingTo: number | null
       historyOffset: number
+      lastRead: Record<string, number>
+      searchQuery: string
     }
   }
 }

@@ -45,6 +45,23 @@ const reactingTo = atom(
 // reply bar to its bottom, so older messages are reached by paging, not scrolling.
 const historyOffset = atom({ plugin: 'signal-pane', key: 'historyOffset' } as const, 0)
 const HISTORY_STEP = 10
+// Per conversation, the newest message the person has seen in the pane.
+const lastRead = atom(
+  { plugin: 'signal-pane', key: 'lastRead' } as const,
+  {} as Record<string, number>,
+)
+const searchQuery = atom({ plugin: 'signal-pane', key: 'searchQuery' } as const, '')
+const SEARCH_HITS = 30
+const TOASTS_PER_POLL = 3
+
+function fold(text: string): string {
+  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+}
+
+function unreadCount(conversation: Conversation, reads: Record<string, number>): number {
+  const since = reads[conversation.id] ?? 0
+  return conversation.messages.filter(message => !message.isMine && message.timestamp > since).length
+}
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 
 export type Directory = {
@@ -366,6 +383,28 @@ async function rpcWith(
   return answer.result
 }
 
+// Copies the clipboard image or a picked file into the attachments folder, so
+// the thread shows it like a received one; prints "id<TAB>mime<TAB>path<TAB>name".
+const STAGE_SCRIPT = `set -e
+dir="$1"; source="$2"; stamp="$3"
+mkdir -p "$dir"
+case "$source" in
+  clipboard)
+    type=$(wl-paste --list-types 2>/dev/null | grep -m1 '^image/' || true)
+    [ -n "$type" ] || { echo "Pas d’image dans le presse-papiers" >&2; exit 3; }
+    ext=\${type#image/}; ext=\${ext%%;*}
+    name="presse-papiers.$ext"
+    out="$dir/out-$stamp.$ext"
+    wl-paste --type "$type" > "$out" ;;
+  pick)
+    file=$(zenity --file-selection --title="Signal : envoyer un fichier" 2>/dev/null) || exit 4
+    name=$(basename "$file"); ext="\${name##*.}"; [ "$ext" = "$name" ] && ext=bin
+    out="$dir/out-$stamp.$ext"
+    cp -- "$file" "$out" ;;
+esac
+chmod 600 "$out"
+printf '%s\\t%s\\t%s\\t%s\\n' "out-$stamp" "$(file -b --mime-type "$out")" "$out" "$name"`
+
 type Thumb = { svg: string; width: number; height: number } | 'pending' | 'failed'
 
 export const register: Register = (on, options) => {
@@ -375,6 +414,8 @@ export const register: Register = (on, options) => {
   let lastNamesAt = 0
   // The linked account's number, read off the log: the author of its own messages in a reaction.
   let account = ''
+  // Newest incoming timestamp already announced; 0 until the first parse of the session.
+  let notifiedUpTo = 0
 
   on('session.start', async ($, e, next) => {
     const host = await $.process.run([
@@ -452,9 +493,40 @@ export const register: Register = (on, options) => {
       // A typing indicator expires on its own: parse again next poll so it clears.
       if (conversations.some(one => one.typing)) lastStamp = ''
       const active = conversations.filter(one => one.lastAt > 0).length
+
+      const openId = await read($, selected)
+      const isShown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+      const isWatching = (id: string) => isShown && openId === id
+      const isFirstParse = notifiedUpTo === 0
+      const reads = { ...(await read($, lastRead)) }
+      for (const one of conversations) {
+        // A session starts with nothing unread; afterwards an open, shown thread is read.
+        if ((isFirstParse || isWatching(one.id)) && reads[one.id] !== one.lastAt) reads[one.id] = one.lastAt
+      }
+      await update($, lastRead, () => reads)
+
+      const incoming = conversations.flatMap(one =>
+        one.messages.filter(message => !message.isMine).map(message => ({ one, message })),
+      )
+      const newest = incoming.reduce((max, hit) => Math.max(max, hit.message.timestamp), 0)
+      if (!isFirstParse) {
+        incoming
+          .filter(hit => hit.message.timestamp > notifiedUpTo && !isWatching(hit.one.id))
+          .sort((a, b) => a.message.timestamp - b.message.timestamp)
+          .slice(-TOASTS_PER_POLL)
+          .forEach(({ one, message }) => {
+            const who = one.isGroup ? `${one.name} · ${message.sender}` : one.name
+            $.ui.toast(`Signal · ${who} : ${message.text || '[pièce jointe]'}`)
+          })
+      }
+      notifiedUpTo = Math.max(notifiedUpTo, newest, 1)
+
+      const unread = conversations.reduce((sum, one) => sum + unreadCount(one, reads), 0)
       await update($, model, () => ({
         conversations,
-        status: warning || `${active} conversations actives · ${conversations.length} au total`,
+        status:
+          warning ||
+          `${unread > 0 ? `${unread} non lu${unread > 1 ? 's' : ''} · ` : ''}${active} conversations actives · ${conversations.length} au total`,
       }))
     }
 
@@ -559,6 +631,32 @@ export const register: Register = (on, options) => {
           })
         } catch (error) {
           $.ui.toast(`Signal : réaction échouée (${error instanceof Error ? error.message : 'erreur'})`)
+        }
+      }
+
+      const sendAttachment = async (source: 'clipboard' | 'pick') => {
+        const staged = await $.process.run(
+          ['sh', '-c', STAGE_SCRIPT, 'sh', paths.attachments, source, String(Date.now())],
+          { timeoutMs: 10 * 60 * 1000 },
+        )
+        if (staged.exitCode === 4) return
+        const [id, contentType, path, filename] = staged.stdout.trim().split('\t')
+        if (staged.exitCode !== 0 || !id || !path) {
+          $.ui.toast(`Signal : ${staged.stderr.trim() || 'fichier introuvable'}`)
+          return
+        }
+        try {
+          const result = (await rpcWith($, 'send', { ...target, attachments: [path] })) as {
+            timestamp?: number
+          }
+          await logSent(result.timestamp ?? Date.now(), {
+            message: '',
+            attachments: [{ id, contentType, filename }],
+          })
+          await update($, sentCount, value => value + 1)
+          await update($, historyOffset, () => 0)
+        } catch (error) {
+          $.ui.toast(`Signal : envoi échoué (${error instanceof Error ? error.message : 'erreur'})`)
         }
       }
 
@@ -751,6 +849,16 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           </Box>
+          <Box flexDirection="row" gap={2} marginTop={1} flexShrink={0}>
+            <Button
+              key="paste-image"
+              plain
+              dimColor
+              label="📋 Coller l’image"
+              onPress={() => void sendAttachment('clipboard')}
+            />
+            <Button key="pick-file" plain dimColor label="📎 Fichier…" onPress={() => void sendAttachment('pick')} />
+          </Box>
           {Input ? (
             // A column that stretches its child: the field takes the whole width.
             <Box marginTop={1} width="100%" flexShrink={0} flexDirection="column" alignItems="stretch">
@@ -769,10 +877,20 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const active = conversations.filter(one => one.lastAt > 0)
-    const others = conversations.filter(one => one.lastAt === 0)
+    const reads = await read($, lastRead)
+    const query = await read($, searchQuery)
+    const open_ = (conversation: Conversation, offset = 0) => {
+      void update($, historyOffset, () => offset)
+      void update($, lastRead, current => ({ ...current, [conversation.id]: conversation.lastAt }))
+      void update($, selected, () => conversation.id)
+      $.ui.scroll({ in: PANE, to: 'end' }).catch(() => undefined)
+    }
+    const title = (conversation: Conversation) =>
+      conversation.isGroup ? `# ${conversation.name}` : conversation.name
+
     const row = (conversation: Conversation) => {
       const last = conversation.messages[conversation.messages.length - 1]
+      const unread = unreadCount(conversation, reads)
       const preview = conversation.typing
         ? `${conversation.typing.name} écrit…`
         : last
@@ -780,19 +898,13 @@ export const register: Register = (on, options) => {
           : ''
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Button
-            key={conversation.id}
-            plain
-            onPress={() => {
-              void update($, selected, () => conversation.id)
-              $.ui.scroll({ in: PANE, to: 'end' }).catch(() => undefined)
-            }}
-          >
-            {conversation.isGroup ? `# ${conversation.name}` : conversation.name}
+          <Button key={conversation.id} plain onPress={() => open_(conversation)}>
+            <Text bold={unread > 0}>{title(conversation)}</Text>
             {conversation.lastAt > 0 && <Text dimColor> {formatTime(conversation.lastAt)}</Text>}
+            {unread > 0 && <Text bold color={MINE_BACKGROUND}> ● {unread}</Text>}
           </Button>
           {preview && (
-            <Text dimColor wrap="truncate-end">
+            <Text dimColor={unread === 0} wrap="truncate-end">
               {preview}
             </Text>
           )}
@@ -800,8 +912,71 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const searchBar = Input && (
+      <Box width="100%" flexDirection="column" alignItems="stretch">
+        <Input
+          key="search"
+          placeholder="Rechercher un contact ou un message…"
+          value={query}
+          submitLabel="chercher"
+          onInput={value => void update($, searchQuery, () => value)}
+          onSubmit={value => void update($, searchQuery, () => value)}
+        />
+      </Box>
+    )
+
+    const folded = fold(query.trim())
+    if (folded.length >= 2) {
+      const named = conversations.filter(one => fold(one.name).includes(folded))
+      const hits = conversations
+        .flatMap(one =>
+          one.messages
+            .map((message, index) => ({ one, message, index }))
+            .filter(hit => fold(hit.message.text).includes(folded)),
+        )
+        .sort((a, b) => b.message.timestamp - a.message.timestamp)
+        .slice(0, SEARCH_HITS)
+      return (
+        <Box flexDirection="column">
+          {searchBar}
+          <Button key="clear-search" plain dimColor label="✕ Effacer la recherche" onPress={() => void update($, searchQuery, () => '')} />
+          {named.length > 0 && (
+            <Box marginTop={1}>
+              <Text bold dimColor>
+                Contacts et groupes
+              </Text>
+            </Box>
+          )}
+          {named.map(row)}
+          <Box marginTop={1}>
+            <Text bold dimColor>
+              {hits.length > 0 ? 'Messages' : 'Aucun message trouvé'}
+            </Text>
+          </Box>
+          {hits.map(({ one, message, index }) => (
+            <Box flexDirection="column" marginTop={1}>
+              <Button
+                key={`hit-${one.id}-${message.timestamp}`}
+                plain
+                onPress={() => open_(one, one.messages.length - 1 - index)}
+              >
+                {title(one)}
+                <Text dimColor> {formatTime(message.timestamp)}</Text>
+              </Button>
+              <Text dimColor wrap="truncate-end">
+                {`${message.isMine ? 'Moi' : message.sender} : ${message.text}`}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      )
+    }
+
+    const active = conversations.filter(one => one.lastAt > 0)
+    const others = conversations.filter(one => one.lastAt === 0)
     return (
       <Box flexDirection="column">
+        {searchBar}
         <Text dimColor>{status}</Text>
         {active.map(row)}
         {others.length > 0 && (
@@ -812,13 +987,8 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {others.map(conversation => (
-          <Button
-            key={conversation.id}
-            plain
-            dimColor
-            onPress={() => void update($, selected, () => conversation.id)}
-          >
-            {conversation.isGroup ? `# ${conversation.name}` : conversation.name}
+          <Button key={conversation.id} plain dimColor onPress={() => open_(conversation)}>
+            {title(conversation)}
           </Button>
         ))}
       </Box>

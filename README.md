@@ -22,6 +22,13 @@ account, runs it as a local daemon, and the mod reads what that daemon receives.
   of the latest images in the thread.
 - A reply bar pinned to the bottom of the pane. A message is sent only when you
   press Enter in it.
+- Send images and files: "📋 Coller l'image" sends the clipboard image,
+  "📎 Fichier…" opens a file picker.
+- Unread counts per conversation, and an in-app toast when a message arrives
+  in another conversation than the one open (no system notification: Signal
+  Desktop or your phone already does that).
+- Search across contact names, group names and message text (accent- and
+  case-insensitive); a hit opens the thread at that message.
 
 Limits: signal-cli keeps no history, so the pane only shows what arrived after
 linking. Signal has no "online" status, so neither does the pane. Messages are
@@ -30,7 +37,9 @@ stored by the daemon as plain JSON lines in its data folder (mode 600).
 ## Requirements
 
 - Linux with systemd (user services), `signal-cli` 0.14+, `qrencode`,
-  ImageMagick 7 (`magick`) for thumbnails, `xdg-open`.
+  ImageMagick 7 (`magick`) for thumbnails, `xdg-open`, `wl-paste`
+  (wl-clipboard, Wayland) to send the clipboard image, `zenity` for the file
+  picker.
 - Claude Code with mods (plugins with hooks modules). Thumbnails need a surface
   that draws SVG, such as the Claude desktop app.
 
