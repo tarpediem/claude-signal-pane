@@ -752,7 +752,8 @@ export const register: Register = (on, options) => {
           )}
           </Box>
           {Input ? (
-            <Box marginTop={1} width="100%" flexShrink={0}>
+            // A column that stretches its child: the field takes the whole width.
+            <Box marginTop={1} width="100%" flexShrink={0} flexDirection="column" alignItems="stretch">
               <Input
                 key={`reply-${open.id}-${count}`}
                 placeholder={`Message à ${open.name}`}
