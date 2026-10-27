@@ -1,0 +1,5 @@
+{
+  "name": "claude-signal-pane",
+  "owner": { "name": "tarpediem" },
+  "plugins": [{ "name": "signal-pane", "source": "./" }]
+}

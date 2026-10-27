@@ -1,0 +1,21 @@
+{
+  "name": "signal-pane",
+  "version": "0.1.0",
+  "description": "Signal in a Claude Code pane: conversations, bubbles, replies, reactions, read receipts and image thumbnails, through a linked signal-cli device",
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "userConfig": {
+    "dataDir": {
+      "type": "string",
+      "title": "signal-cli data folder",
+      "description": "The --config folder of the linked signal-cli; the daemon writes messages.jsonl there",
+      "default": "~/.local/share/signal-cli-perso"
+    },
+    "rpcPort": {
+      "type": "number",
+      "title": "signal-cli HTTP port",
+      "description": "Port of the signal-cli daemon's JSON-RPC HTTP server on 127.0.0.1",
+      "default": 8081
+    }
+  }
+}

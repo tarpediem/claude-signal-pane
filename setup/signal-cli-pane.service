@@ -1,0 +1,19 @@
+[Unit]
+Description=signal-cli daemon for the Claude Code Signal pane (linked device)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.config/signal-cli-pane.env
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/signal-cli-pane.env
+UMask=0077
+# @...@ placeholders are filled by link.sh. Received messages are printed as
+# JSON lines on stdout and appended to the log the pane reads.
+ExecStart=@SIGNAL_CLI@ --config @DATA@ -o json -a ${SIGNAL_ACCOUNT} daemon --http 127.0.0.1:@PORT@ --receive-mode on-start
+StandardOutput=append:@DATA@/messages.jsonl
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
